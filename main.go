@@ -22,7 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 var logFile *os.File
 
@@ -115,6 +115,11 @@ type Global struct {
 	HOST   string `json:"host"`
 	PORT   string `json:"port"`
 	BYPASS string `json:"bypass"`
+}
+
+type DNS struct {
+	Service string `json:"service"`
+	DNS     string `json:"dns"`
 }
 
 // Validate PAC URL
@@ -306,6 +311,40 @@ func setGlobalProxy(service, host, port, bypass string) error {
 	return nil
 }
 
+// Validate DNS parameters
+func validateDNS(service, dns string) error {
+	if service == "" {
+		return errors.New("service name is required")
+	}
+	if strings.ContainsAny(service, "&|;`$(){}[]\\") {
+		return errors.New("service name contains illegal characters")
+	}
+	if dns == "" {
+		return errors.New("dns is required")
+	}
+	// dns can be "Empty" or space-separated IP addresses
+	if dns != "Empty" {
+		for _, ip := range strings.Fields(dns) {
+			if strings.ContainsAny(ip, "&|;`$(){}[]\\") {
+				return errors.New("dns contains illegal characters")
+			}
+		}
+	}
+	return nil
+}
+
+// Set DNS for a service
+func setDNS(service, dns string) error {
+	var args []string
+	if dns == "Empty" {
+		args = []string{"-setdnsservers", service, "Empty"}
+	} else {
+		args = append([]string{"-setdnsservers", service}, strings.Fields(dns)...)
+	}
+	cmd := exec.Command("networksetup", args...)
+	return cmd.Run()
+}
+
 func NewServer(addr string) *Server {
 	engine := gin.Default()
 	srv := &http.Server{
@@ -453,6 +492,40 @@ func (s *Server) setupRoutes() {
 				"error": "Failed to set global proxy for any service: " + strings.Join(errorMessages, "; "),
 			})
 		}
+	})
+
+	s.engine.POST("/dns", func(c *gin.Context) {
+		log.Printf("Received DNS set request")
+		var dns DNS
+
+		if err := c.ShouldBindJSON(&dns); err != nil {
+			log.Printf("Failed to parse DNS request: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		log.Printf("Received DNS settings: service=%s, dns=%s", dns.Service, dns.DNS)
+
+		if err := validateDNS(dns.Service, dns.DNS); err != nil {
+			log.Printf("DNS validation failed: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		if err := setDNS(dns.Service, dns.DNS); err != nil {
+			log.Printf("Failed to set DNS for %s: %v", dns.Service, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to set DNS: " + err.Error(),
+			})
+			return
+		}
+
+		log.Printf("Successfully set DNS for %s to %s", dns.Service, dns.DNS)
+		c.String(200, "DNS has been set successfully")
 	})
 
 	s.engine.GET("/off", func(c *gin.Context) {
